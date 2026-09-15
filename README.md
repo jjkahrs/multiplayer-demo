@@ -2,6 +2,9 @@
 
 Rapid prototype of client ↔ server MMO communication: a Rust WebSocket server (MySQL-backed) authoritative over one zone, a Unity client, and a Rust bot loader that proves **150 players in one zone at 20 Hz with p95 latency < 100 ms**.
 
+[Watch example with 150 connected bots + forced 200ms latency + forced 50ms jitter ](https://youtu.be/KkDHSZBbMSI)
+
+
 - `dumb-server/` — Rust workspace: `protocol`, `server`, `bot` crates + docker-compose stack
 - `dumb-unity-client/` — Unity 6000.6.0f1 client
 - `docs/` — requirements, technical design, task plan, [demo run results](docs/demo-run.md)
