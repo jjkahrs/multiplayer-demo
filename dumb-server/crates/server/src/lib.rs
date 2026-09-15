@@ -6,6 +6,7 @@ pub mod config;
 pub mod http;
 pub mod ingest;
 pub mod metrics;
+pub mod netsim;
 pub mod player;
 pub mod profile;
 pub mod writer;

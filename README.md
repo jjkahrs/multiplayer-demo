@@ -137,12 +137,54 @@ Environment variables read by the server (set them under `server.environment` in
 | `GRACE_MS` | `5000` | Disconnect grace before a player is removed |
 | `SPEED` | `5.0` | Walk speed, m/s |
 | `WORLD_HALF` | `50` | World half-size, m (world is ±50 m) |
+| `LATENCY_MS` | `0` | Simulated added round-trip ms (half each direction) |
+| `JITTER_MS` | `0` | Max extra random round-trip ms; frame order preserved |
 
 ### Running without Docker
 ```powershell
 cargo run --release -p server                          # in-memory, no MySQL
 target\release\bot.exe --clients 150 --duration 60     # second terminal
 ```
+
+## Simulating network latency and jitter
+Everything runs on localhost, so by default there is almost no network delay. Set `LATENCY_MS` / `JITTER_MS` on the server to delay every connection (Unity clients and bots) as if it were on a real network.
+
+How it works:
+- The server delays each WebSocket data frame, in both directions. Each direction gets `LATENCY_MS/2 + random[0, JITTER_MS/2]` ms, so the added **round trip** is between `LATENCY_MS` and `LATENCY_MS + JITTER_MS`.
+- Frames never overtake each other. Ping/pong/close control frames are not delayed.
+- Settings are global and read once at startup. To change them, restart the server.
+- `0`/`0` (the default) turns simulation off completely. Bad values (`abc`, `-5`) also fall back to `0`.
+
+### Local server
+```powershell
+$env:LATENCY_MS='100'; $env:JITTER_MS='40'
+cargo run --release -p server
+```
+Turn it off again with `Remove-Item Env:LATENCY_MS, Env:JITTER_MS` and restart the server.
+
+### Docker stack
+`docker/docker-compose.yml` reads both variables from your shell (default `0`):
+```powershell
+$env:LATENCY_MS='100'; $env:JITTER_MS='40'
+docker compose -f docker/docker-compose.yml up -d
+```
+Compose only picks up the new values when it recreates the container, so run `up -d` again after changing them.
+
+### Check it is on
+The startup log shows the effective values, plus a warning whenever simulation is active:
+```
+INFO server::config: effective config ... latency_ms=100 jitter_ms=40
+WARN server::config: network simulation active: all connections delayed latency_ms=100 jitter_ms=40
+```
+(`docker compose -f docker/docker-compose.yml logs server` for the Docker stack.)
+
+### Measure the effect
+Run the bot loader against the delayed server and compare with a `0`/`0` run. The bot's `latency avg` is a one-way `t0` echo (sender uplink + tick wait + receiver downlink), so `100`/`40` should add roughly **+100 to +150 ms**. Recorded run: 30.8 ms → 168.9 ms (+138 ms), 150/150 connected, 20.0 Hz. See Run 3 in [docs/demo-run.md](docs/demo-run.md).
+
+Caveats:
+- If the client closes the socket with a WebSocket Close frame, any server replies still waiting in the delay queue are dropped. Messages the client already sent are still processed. Sending `leave` first avoids this.
+- Values above ~1000 ms are untested. Client and bot connect/join timeouts may trip.
+- Server memory grows while simulation is on, because frames wait in per-connection queues (≈ 14 → 42 MiB with 150 bots at 100/40).
 
 ## Troubleshooting
 - **`0/150 connected`** — server not reachable. Check `curl.exe http://127.0.0.1:8080/health` and `docker compose -f docker/docker-compose.yml ps`.

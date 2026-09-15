@@ -1,0 +1,17 @@
+{
+  "total": 150,
+  "connected": 150,
+  "dropped": 0,
+  "recvRateHz": 19.99756701348806,
+  "latencySamples": 13363680,
+  "latencyAvgMs": 30.760767094093843,
+  "latencyP95Ms": 46,
+  "serverMetrics": {
+    "cpuPercent": 0.75347304,
+    "lastTickDtMs": 46.4432,
+    "memBytes": 14811136,
+    "players": 150,
+    "snapshotsPerSec": 19.971917486821777,
+    "tickCount": 1242
+  }
+}

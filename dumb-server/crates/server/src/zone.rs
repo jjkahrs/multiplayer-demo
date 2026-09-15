@@ -280,6 +280,7 @@ mod tests {
             speed: 5.0,
             world_half: 50.0,
             database_url: None,
+            net_sim: crate::netsim::NetSim::default(),
         }
     }
 

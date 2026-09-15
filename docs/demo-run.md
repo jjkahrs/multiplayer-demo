@@ -223,3 +223,86 @@ Screenshots: [T8.2-B-before.png](./screenshots/T8.2-B-before.png), [T8.2-B-after
 - **Overview screenshot uses a temporary camera.** `T8.3-after-overview.png` is a positioned capture, so the overlay UI (status line) is absent; `T8.3-after-crowd.png` is the real client view with UI.
 - **Latency caveats from Run 1 still apply:** one shared clock, includes 0–50 ms tick wait, and bots, server, and Unity all share this machine.
 - **No deviation from the 100 ms target.** p95 was 58 ms.
+
+---
+
+## Run 3 — Network simulation: baseline vs LATENCY_MS=100 JITTER_MS=40
+
+Evidence for [REQUIREMENTS-netsim.md](./REQUIREMENTS-netsim.md).
+
+**Date:** 2026-09-15 13:05 -04:00
+
+### Machine
+Same machine as Run 2: Windows 11 Home 10.0.26200, Intel Core i9-14900K (24 cores / 32 logical), 63.8 GB RAM, Rust 1.90.0. Server and all 150 bots ran on this one machine; both runs back to back in the same session.
+
+### Build under test
+- `cargo build --release -p server -p bot` from the working tree with the netsim tasks T1.1–T3.3 applied (no git commits in this project)
+- Native `target\release\server.exe`, **in-memory** (no `DATABASE_URL`, no MySQL, no Docker)
+
+### Commands
+From `dumb-server/` in PowerShell:
+```
+cargo build --release -p server -p bot
+
+# Bad values (log check only)
+$env:LATENCY_MS='abc'; $env:JITTER_MS='-5'; target\release\server.exe    # stopped after startup log
+
+# Baseline
+Remove-Item Env:LATENCY_MS, Env:JITTER_MS
+target\release\server.exe
+target\release\bot.exe --clients 150 --duration 60 --json ..\docs\netsim-baseline.json
+
+# Delayed
+$env:LATENCY_MS='100'; $env:JITTER_MS='40'
+target\release\server.exe
+target\release\bot.exe --clients 150 --duration 60 --json ..\docs\netsim-100-40.json
+```
+
+### Results
+| Metric | Baseline (0/0) | Delayed (100/40) | Target |
+|---|---|---|---|
+| Connected | **150/150** | **150/150** | 150/150 both |
+| Forced drops | **0** | **0** | 0 both |
+| Snapshot recv rate (avg per client) | **20.0 Hz** | **20.0 Hz** | ≥ 19 Hz both |
+| Latency samples | 13,363,680 | 13,329,258 | — |
+| One-way latency avg | 30.8 ms | 168.9 ms | — |
+| One-way latency p95 | 46 ms | 189 ms | — |
+| **Latency avg delta** | — | **+138.1 ms** | +100 to +150 ms |
+| Server `memBytes` at end of run | 14.1 MiB | 41.7 MiB | — |
+| Server `snapshotsPerSec` at end of run | 19.97 | 20.14 | — |
+
+Raw bot reports: [netsim-baseline.json](./netsim-baseline.json), [netsim-100-40.json](./netsim-100-40.json).
+
+### Startup log lines
+Bad values (`LATENCY_MS=abc JITTER_MS=-5`), no warning line followed:
+```
+INFO server::config: effective config bind=0.0.0.0:8080 tick_hz=20 grace_ms=5000 speed=5.0 world_half=50.0 database_url="(none)" latency_ms=0 jitter_ms=0
+```
+Delayed (`LATENCY_MS=100 JITTER_MS=40`):
+```
+INFO server::config: effective config bind=0.0.0.0:8080 tick_hz=20 grace_ms=5000 speed=5.0 world_half=50.0 database_url="(none)" latency_ms=100 jitter_ms=40
+WARN server::config: network simulation active: all connections delayed latency_ms=100 jitter_ms=40
+```
+
+### Requirement acceptance criteria
+| # | Acceptance criterion (REQUIREMENTS-netsim.md) | Verification | Result |
+|---|---|---|---|
+| 1 | 0/0 → no delay, every existing `cargo test` passes unchanged | Full `cargo test` green after every task; existing e2e tests use `NetSim::default()` (bypass). `netsim_e2e::no_delay_when_off` (join → joined < 100 ms). `netsim::zero_config_releases_immediately` | ✅ |
+| 2 | 200/0 → `joined` ≥ 200 ms after `join` | `netsim_e2e::joined_reply_delayed_by_round_trip`. Teeth check: with `latency_ms: 0` it fails (312 µs) | ✅ |
+| 3 | Single-frame delay within `[L/2, L/2+J/2]` | `netsim::delay_within_bounds` (100/40, 200 iterations in [50, 70] ms); `netsim::idle_gap_does_not_accumulate` | ✅ |
+| 4 | 1000 frames under L=0 J=1000 released in push order | `netsim::preserves_order_under_jitter` | ✅ |
+| 5 | `LATENCY_MS=abc` / `-5` → runs with 0, log shows 0 | Bad-values log line above | ✅ |
+| 6 | Non-zero values → warning names them | Warning log line above | ✅ |
+| 7 | Queued frames delivered before close; queued inbound frames processed | `netsim_e2e::reply_delivered_after_leave` (junk + `leave` both queued; `bad_message` arrives before close). `netsim::next_is_cancel_safe` | ✅ (amended — see caveats) |
+| 8a | 150/150 connected both runs | Results table | ✅ |
+| 8b | 0 forced drops both runs | Results table | ✅ |
+| 8c | Recv rate ≥ 19 Hz both runs | 20.0 Hz both | ✅ |
+| 8d | Latency avg +100 to +150 ms over baseline | +138.1 ms | ✅ |
+| 9 | Docs: README table, compose, demo-run.md | README "Server configuration" rows `LATENCY_MS`/`JITTER_MS`; `docker/docker-compose.yml` `server.environment`; this section | ✅ |
+
+### Caveats
+- **Criterion 7 amended during implementation.** A client-sent WebSocket Close frame drops queued *outbound* frames: axum's tungstenite 0.29 marks the socket `ClosedByPeer` when it reads the Close and rejects later data frames with `SendAfterClosing`. Queued inbound frames are still handled. The same limit exists with simulation off. Verified via `leave` instead.
+- **Delta above the +120 ms mean.** Expected mean added one-way latency is 100 + 40/2 = 120 ms; measured +138 ms. Still inside the accepted range. Not investigated further; the design names order clamping under jitter as the first suspect, and baseline/delayed runs also differ in tick alignment noise.
+- **Memory rises with simulation on** (14 → 42 MiB), from frames held in the per-connection queues. Not a requirement; noted for the 150-player budget.
+- **Baseline isn't comparable to Runs 1–2.** Native in-memory server here vs Docker + MySQL there, so 30.8 ms avg / 46 ms p95 is not a regression check against 34.9 / 58 ms.
+- **Latency caveats from Run 1 still apply:** one shared clock, includes 0–50 ms tick wait, bots and server share this machine.

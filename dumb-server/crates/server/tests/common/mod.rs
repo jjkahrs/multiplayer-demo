@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use futures_util::{SinkExt, StreamExt};
 use protocol::{ClientMsg, ServerMsg, SnapshotPlayer};
 use server::config::Config;
+use server::netsim::NetSim;
 use sqlx::MySqlPool;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -23,6 +24,11 @@ pub const GRACE: Duration = Duration::from_millis(200);
 
 /// Start a server + Zone on an ephemeral port; returns `host:port`.
 pub async fn start_server(pool: Option<MySqlPool>) -> String {
+    start_server_with(pool, NetSim::default()).await
+}
+
+/// [`start_server`] with simulated network conditions.
+pub async fn start_server_with(pool: Option<MySqlPool>, net_sim: NetSim) -> String {
     let config = Config {
         bind: String::new(),
         tick_hz: 20,
@@ -30,10 +36,11 @@ pub async fn start_server(pool: Option<MySqlPool>) -> String {
         speed: 5.0,
         world_half: 50.0,
         database_url: None,
+        net_sim,
     };
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap().to_string();
-    let app = server::http::router(server::zone::spawn(&config, pool));
+    let app = server::http::router(server::zone::spawn(&config, pool), net_sim);
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     addr
 }

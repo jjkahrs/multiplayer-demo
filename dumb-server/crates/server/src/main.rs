@@ -46,7 +46,7 @@ async fn main() {
 
     let zone = zone::spawn(&config, pool);
     tokio::spawn(log_metrics(zone.metrics.clone()));
-    let app = router(zone);
+    let app = router(zone, config.net_sim);
     let listener = match TcpListener::bind(&config.bind).await {
         Ok(listener) => listener,
         Err(err) => {

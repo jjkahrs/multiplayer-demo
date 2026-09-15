@@ -3,6 +3,8 @@
 
 use std::env;
 
+use crate::netsim::NetSim;
+
 /// Effective server configuration.
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -19,6 +21,8 @@ pub struct Config {
     pub world_half: f64,
     /// MySQL URL, `DATABASE_URL`. Absent or empty: run without persistence.
     pub database_url: Option<String>,
+    /// Simulated latency/jitter, `LATENCY_MS` / `JITTER_MS` (default 0/0 = off).
+    pub net_sim: NetSim,
 }
 
 impl Config {
@@ -34,6 +38,10 @@ impl Config {
             database_url: env::var("DATABASE_URL")
                 .ok()
                 .filter(|value| !value.is_empty()),
+            net_sim: NetSim {
+                latency_ms: env_parse("LATENCY_MS", 0),
+                jitter_ms: env_parse("JITTER_MS", 0),
+            },
         }
     }
 
@@ -46,8 +54,17 @@ impl Config {
             speed = self.speed,
             world_half = self.world_half,
             database_url = self.database_url.as_deref().map_or("(none)".to_owned(), redact_password),
+            latency_ms = self.net_sim.latency_ms,
+            jitter_ms = self.net_sim.jitter_ms,
             "effective config"
         );
+        if !self.net_sim.is_off() {
+            tracing::warn!(
+                latency_ms = self.net_sim.latency_ms,
+                jitter_ms = self.net_sim.jitter_ms,
+                "network simulation active: all connections delayed"
+            );
+        }
     }
 }
 

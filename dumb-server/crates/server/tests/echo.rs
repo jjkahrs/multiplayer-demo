@@ -2,6 +2,7 @@
 //! (Formerly the T2.1 `/ws` echo test; `/ws` now talks to the Zone, see `zone_e2e.rs`.)
 
 use server::config::Config;
+use server::netsim::NetSim;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -14,10 +15,11 @@ async fn health_returns_ok_json() {
         speed: 5.0,
         world_half: 50.0,
         database_url: None,
+        net_sim: NetSim::default(),
     };
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let app = server::http::router(server::zone::spawn(&config, None));
+    let app = server::http::router(server::zone::spawn(&config, None), config.net_sim);
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
     let mut stream = TcpStream::connect(addr).await.unwrap();
