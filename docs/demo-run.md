@@ -427,3 +427,54 @@ Screenshots: [prediction-before.png](./screenshots/prediction-before.png) (old c
 - **Existing `NetworkClient` reconnect bug** (not part of this work, not fixed). If the connection drops without `Disconnect()`, the old `SendLoop` stays alive and can swallow the first message of the next connection. Here that was the join, which left the client in `Joining`.
 - **No bot report.** The 1,800 s bot run was stopped after sampling, so the bot report (latency, recv rate) wasn't printed. Server `/metrics` log lines are the evidence for 150 players at 20 Hz.
 - Latency caveats from Run 1 still apply: one shared clock, and bots, server and Unity all on one machine.
+
+## Run 5 — Client HUD: FPS & ping (T3.1 of task-plan-hud)
+
+**Date:** 2026-09-15 −04:00
+**Requirements:** [REQUIREMENTS-hud.md](./REQUIREMENTS-hud.md) · **Design:** [TECHNICAL_DESIGN-hud.md](./TECHNICAL_DESIGN-hud.md) · **Plan:** [task-plan-hud.md](./task-plan-hud.md)
+
+### Setup
+- Server: `cargo run --release -p server`, in memory, no bots. First with no simulation, then restarted with `$env:LATENCY_MS='100'; $env:JITTER_MS='0'`. The startup log confirmed `latency_ms=100 jitter_ms=0` and the "network simulation active" warning.
+- Unity: editor play mode, `Demo.unity`, a single client driven through MCP `execute_code`. No mouse or keyboard.
+
+### Method
+- **FPS:** a single `Application.onBeforeRender` hook created in one `execute_code` call records `Time.unscaledDeltaTime` each frame for 6 s after entering `InWorld`.
+  - When the displayed FPS number changes (after the first 1 s), it computes `frames / Σdt` over the preceding ≥ 0.5 s of frames and compares.
+  - Results go to `SessionState` and are read back after an unpolled wait.
+- **Ping:** the same kind of hook parses `HudText` every 0.5 s from 1 s to 6 s after `InWorld`. The first frame in world is also recorded, for the rejoin check.
+
+### Results
+| Check | Measured |
+|---|---|
+| FPS vs frame times (netsim off) | 3,429 frames, 9 HUD refreshes compared. Shown/actual: 582/582.0, 569/569.2, 553/553.2, 559/559.1, 523/522.9, 600/600.3, 577/577.0, 578/577.6, 594/594.3. **Max deviation 0.06 %** |
+| Ping, netsim off (11 samples) | 58, 48, 40, 39, 33, 27, 22, 33, 28, 23, 7 ms |
+| Disconnected (server killed) | `Disconnected`, `HudText` inactive, `StatusText` active ("Disconnected: The remote party closed the WebSocket connection…") |
+| First frame in world after rejoin | `FPS: 0 / Ping: -- ms`, HUD active, `StatusText` inactive |
+| Ping, `LATENCY_MS=100` (11 samples) | 156, 149, 144, 140, 141, 138, 161, 156, 166, 162, 155 ms |
+| `cargo test` (after the run) | 55 passed, 0 failed |
+| Unity EditMode (T2.1) | 32/32 |
+
+Screenshots: [hud-before.png](./screenshots/hud-before.png) (`InWorld` status text top-left, no HUD) · [hud-after.png](./screenshots/hud-after.png) (`FPS: 605 / Ping: 50 ms`) · [hud-after-latency100.png](./screenshots/hud-after-latency100.png) (`FPS: 576 / Ping: 148 ms`).
+
+### Requirement acceptance criteria
+| # | Criterion | Evidence | Result |
+|---|---|---|---|
+| 1 | HUD hidden when not `InWorld` | T2.1 before-join read and this run's disconnected read: `HudText` inactive | ✅ |
+| 2 | HUD top-left, no overlap | `hud-after.png`; `StatusText` inactive in world | ✅ |
+| 3 | FPS within ±10 % | Max 0.06 % over 9 comparisons | ✅ |
+| 4 | Ping 0–60 ms with netsim off, updating | 7–58 ms, 10 distinct values | ✅ |
+| 5 | Ping 100–175 ms at `LATENCY_MS=100` | 138–166 ms | ✅ |
+| 6 | Samples only on a new `seq` | EditMode `PingSampler_RepeatedSeq_SamplesOnce` (teeth-checked in T1.2) | ✅ |
+| 7 | No local entry / no sample yet keeps value | EditMode `NoLocalEntry_KeepsLast`, `BeforeJoin_Null`, `SeqZero_NoSample` | ✅ |
+| 8 | Rejoin shows `--` until a new sample | First in-world read after rejoin `Ping: -- ms`; EditMode `SetLocalPlayer_ClearsPing` | ✅ |
+| 9 | Screenshots saved; existing tests pass | Links above; EditMode 32/32, `cargo test` 55 passed | ✅ |
+
+### Caveats
+- **Existing `NetworkClient` reconnect bug hit again** (same as the Run 4 caveat; not part of this work, not fixed).
+  - After killing the server and restarting it with latency, the first rejoin stayed in `Joining`. The socket was `Established`, the server logged `players=0`, and 1 bot joined the same server fine.
+  - Reflection on the client showed `sendQueue.Count=0` and `sendSignal.CurrentCount=0`: the join was consumed by the previous connection's `SendLoop`.
+  - Re-sending `client.Join("HudLat")` joined immediately. All rejoin and latency numbers above come from that session.
+- **Screenshot missed overlay UI once.** A capture taken while stuck in `Joining` showed only the ground, with no join panel even though `JoinPanel` was active. It was discarded. The retake after joining included the overlay as usual.
+- **"PlayerLoop internal function has been called recursively" ×5** in the Unity console during this play session. It appeared around the server kill and the MCP calls. The cause was not investigated; HUD behavior and the samples were unaffected.
+- **Localhost ping sits near the 60 ms ceiling at times** (max 58 ms). That is the up-to-50 ms tick wait plus up to one frame. A slower frame or MCP stall could push a sample past 60 without anything being wrong.
+- **Absolute FPS (~520–630) is an empty zone in the editor.** It is not comparable to the 150-avatar runs.

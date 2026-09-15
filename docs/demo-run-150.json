@@ -2,16 +2,16 @@
   "total": 150,
   "connected": 150,
   "dropped": 0,
-  "recvRateHz": 19.99173842709836,
-  "latencySamples": 13376821,
-  "latencyAvgMs": 255.77350014626046,
-  "latencyP95Ms": 279,
+  "recvRateHz": 19.99155859397512,
+  "latencySamples": 13368898,
+  "latencyAvgMs": 256.70688511498855,
+  "latencyP95Ms": 278,
   "serverMetrics": {
-    "cpuPercent": 17.073172,
-    "lastTickDtMs": 50.642684,
+    "cpuPercent": 12.804656,
+    "lastTickDtMs": 49.750141,
     "memBytes": 35913728,
     "players": 151,
-    "snapshotsPerSec": 19.99804647654562,
-    "tickCount": 1709
+    "snapshotsPerSec": 20.002971241348188,
+    "tickCount": 1618
   }
 }

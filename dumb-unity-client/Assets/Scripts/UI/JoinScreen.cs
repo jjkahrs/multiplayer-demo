@@ -65,6 +65,7 @@ namespace Demo
         {
             statusText.text = state.ToString();
             panel.SetActive(state != NetworkClient.State.InWorld);
+            statusText.gameObject.SetActive(state != NetworkClient.State.InWorld); // the HUD owns top-left in world
             joinButton.interactable = state == NetworkClient.State.Disconnected || state == NetworkClient.State.Joining;
         }
 
