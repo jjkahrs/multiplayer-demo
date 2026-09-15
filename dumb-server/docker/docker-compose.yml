@@ -1,0 +1,42 @@
+# Local demo stack: MySQL + server. Run from dumb-server/:
+#   docker compose -f docker/docker-compose.yml up --build -d
+# Credentials are local-demo only.
+name: multiplayer-demo
+
+services:
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: demo
+      MYSQL_USER: demo
+      MYSQL_PASSWORD: demo
+    ports:
+      - "3306:3306"
+    volumes:
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      # TCP ping: fails while the entrypoint's socket-only init server runs,
+      # so "healthy" means init.sql has been applied.
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 30s
+
+  server:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    environment:
+      DATABASE_URL: mysql://demo:demo@mysql:3306/demo
+      BIND: 0.0.0.0:8080
+    ports:
+      - "8080:8080"
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+volumes:
+  mysql-data:
