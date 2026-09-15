@@ -92,7 +92,7 @@ pub async fn run(index: usize, url: String, deadline: Instant) -> BotStats {
                     stats.dropped = true;
                     break;
                 };
-                if let Some(ServerMsg::Snapshot { players }) = parse(frame) {
+                if let Some(ServerMsg::Snapshot { players, .. }) = parse(frame) {
                     stats.snapshots += 1;
                     let now = now_ms();
                     for p in players.iter().filter(|p| p.id != own_id) {

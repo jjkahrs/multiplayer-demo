@@ -53,9 +53,10 @@ namespace Demo
             Send(new ClientJoin(name));
         }
 
-        public void SetInput(float vx, float vz)
+        /// <summary>Sends a movement intent; returns its seq, or -1 when not in world (nothing sent).</summary>
+        public long SetInput(float vx, float vz)
         {
-            if (CurrentState != State.InWorld) return;
+            if (CurrentState != State.InWorld) return -1;
             Send(new ClientInput
             {
                 vx = vx,
@@ -63,6 +64,7 @@ namespace Demo
                 seq = ++seq,
                 t0 = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
             });
+            return seq;
         }
 
         public void Disconnect() => cts?.Cancel();

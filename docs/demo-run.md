@@ -306,3 +306,124 @@ WARN server::config: network simulation active: all connections delayed latency_
 - **Memory rises with simulation on** (14 → 42 MiB), from frames held in the per-connection queues. Not a requirement; noted for the 150-player budget.
 - **Baseline isn't comparable to Runs 1–2.** Native in-memory server here vs Docker + MySQL there, so 30.8 ms avg / 46 ms p95 is not a regression check against 34.9 / 58 ms.
 - **Latency caveats from Run 1 still apply:** one shared clock, includes 0–50 ms tick wait, bots and server share this machine.
+
+---
+
+## Run 4 — Client prediction & snapshot interpolation (LATENCY_MS=200 JITTER_MS=80)
+
+Evidence for [REQUIREMENTS-prediction.md](./REQUIREMENTS-prediction.md).
+
+### Before (T1.1) — current client, no prediction
+
+**Date:** 2026-09-15 14:38 -04:00
+
+**Machine:** same as Run 3 (Windows 11 Home 10.0.26200, i9-14900K, 63.8 GB, RTX 4070 Ti SUPER). Server, 149 bots and the Unity editor on one machine.
+
+**Build under test:** working tree before any prediction task (no source changes). Native `target\release\server.exe`, in-memory. Unity 6000.6.0f1 editor, `Assets/Scenes/Demo.unity`, driven through Unity MCP.
+
+**Commands** (PowerShell, from `dumb-server/`):
+```
+cargo build --release -p server -p bot
+$env:LATENCY_MS='200'; $env:JITTER_MS='80'; target\release\server.exe
+target\release\bot.exe --clients 149 --duration 300    # frame-time sample
+target\release\bot.exe --clients 149 --duration 600    # key→motion sample (first batch expired)
+```
+Unity: Play → `execute_code` sets `NameField` = `EditorA` and invokes `JoinButton` → `InWorld`, 150 avatars.
+
+**Server startup log:** `WARN server::config: network simulation active: all connections delayed latency_ms=200 jitter_ms=80`.
+
+**Bot report (first batch, 300 s):** 149/149 connected, 0 drops, 20.0 Hz, one-way latency avg 286.9 ms, p95 327 ms.
+
+#### Results
+| Metric | Before |
+|---|---|
+| Avatars rendered | 150 |
+| Frame time (10 s, first 10 frames skipped, 1,534 frames) | **6.52 ms avg (153.4 fps)**, p95 7.20 ms, p99 7.53 ms, max 16.35 ms |
+| Start latency: `wKey.isPressed` → avatar moved > 1 mm | **+45 frames, 292.6 ms** |
+| Start: walk animation (`Animator` `Moving`) | +45 frames (same frame as first motion) |
+| Stop latency: `wKey.isPressed` false → position stops changing (first frame of a ≥ 60-frame run with < 1 mm/frame) | **+73 frames, 1,401.8 ms** |
+| Stop: idle animation | +34 frames |
+| Walk | W held 5.01 s, (0.00, 0.00) → (0.00, 25.22) |
+
+Screenshot mid-walk: [prediction-before.png](./screenshots/prediction-before.png).
+
+#### Method
+- **Frame time:** an `Application.onBeforeRender` hook created via `execute_code` records `Time.unscaledDeltaTime` for 10 s after skipping 10 frames. The hook lives in the one call, so no `execute_code` compile lands inside the sample.
+- **Key→motion:** a second `onBeforeRender` hook waits for the local avatar to be still for 144 frames, then sets W with `InputState.Change(Keyboard.current, new KeyboardState(Key.W))`. Each frame it stamps `Time.frameCount` when `wKey.isPressed` first reads true, when the avatar first moves > 1 mm and when `Animator.GetBool("Moving")` goes true. It captures the screenshot 2 s into the walk, releases W after 5 s, and stamps the release, stop and idle frames the same way.
+
+#### Caveats
+- **Synthetic key path changed from Run 2.** `InputSystem.QueueStateEvent` did not reach play-mode code: with the editor unfocused, `editorInputBehaviorInPlayMode = PointersAndKeyboardsRespectGameViewFocus` sends keyboard events to editor updates only. `execute_code` saw `wKey.isPressed` true while `MovementInput` and the per-frame hook saw false for 1,000+ frames, and the avatar did not move. Temporarily switching to `AllDeviceInputAlwaysGoesToGameView` + `IgnoreFocus` did not change that. `InputState.Change` from inside the player loop did work, and `MovementInput` still reads the key through `Keyboard.current`. The settings were restored afterwards; they were in-memory defaults (no settings asset).
+- **Stop frame time is uneven.** The stop took 73 frames over 1,402 ms (~19 ms/frame), vs 45 frames over 293 ms (~6.5 ms/frame) at the start. MCP status polls were running during the stop and likely caused the slow frames. Treat ms as the primary stop number.
+- **Stop includes the smoothing tail.** The exponential smoothing never reaches its target exactly, so "stopped" means < 1 mm/frame held for 60 frames.
+- **Frame time and key→motion came from separate bot batches.** Both had 149 bots and 150 avatars.
+- **Bot duration** was 300 s / 600 s instead of the plan's 120 s, to leave time for the MCP-driven sampling.
+
+### After (T5.1) — local prediction + remote interpolation
+
+**Date:** 2026-09-15 15:42 -04:00
+
+**Build under test:** working tree with tasks T2.1–T4.2 applied, including the user-approved "age per direction run" amendment (see [task-plan-prediction.md](./task-plan-prediction.md) T2.2/T3.1). Native `target\release\server.exe`, rebuilt after the amendment, in memory. Same editor and scene; `Demo.unity` has `ZoneView.movementInput` assigned.
+
+**Commands** (PowerShell, from `dumb-server/`):
+```
+cargo build --release -p server -p bot
+$env:LATENCY_MS='200'; $env:JITTER_MS='80'; target\release\server.exe
+target\release\bot.exe --clients 149 --duration 1800    # stopped after sampling
+cargo test
+```
+Unity: Play → join `EditorA` → one `execute_code` `onBeforeRender` hook ran every measurement in sequence and wrote the results to a file. The hook was not polled while it ran, because each `execute_code` call compiles on the main thread and stalls the editor (see caveats).
+
+**Server during the run:** `players=150`, 19.8–20.2 snapshots/s, tick dt 46–62 ms, 31–40 MB.
+
+#### Results: before vs after
+| Metric | Before (T1.1) | After (T5.1) |
+|---|---|---|
+| Avatars rendered | 150 | 150 |
+| Frame time (10 s, first 10 frames skipped) | 6.52 ms avg (**153.4 fps**), p95 7.20, p99 7.53, max 16.35 (1,534 frames) | 7.01 ms avg (**142.7 fps**), p95 7.73, p99 10.43, max 16.86 (1,428 frames) |
+| Start: `wKey.isPressed` → avatar moved > 1 mm | +45 frames, 292.6 ms | **+0 frames, 0.0 ms** |
+| Start: walk animation | +45 frames | **+0 frames** |
+| Stop: `wKey.isPressed` false → first frame with < 1 mm movement | (not measured this way) | **+0 frames** |
+| Stop: first frame of a ≥ 60-frame run with < 1 mm/frame | +73 frames, 1,401.8 ms | +60 frames (see caveats) |
+| Stop: idle animation | +34 frames | **+0 frames** |
+| Straight walk: W held 5.01 s, (0.00, 15.03) → (0.00, 40.03) | — | 100 reconciles, **0 snaps**, max `LastError` 0.0045 m |
+| Stop settle | — | Stop seq 4326 acked 272 ms after release. \|display − snapshot\| per snapshot: +0 ms 0.072, +80 ms 0.015, +129 ms 0.008, +176 ms 0.004, +203 ms 0.003, +236 ms 0.002. **0.002 m at +250 ms** |
+| Remotes: 10 bots × 1,429 frames | — | All frame pairs: 14,280, **0** jumps > 5 × dt × 2 (worst 0.87×). Filtered straight-walk pairs (headings within 1°, > 2 m from bounds): 11,460, **0 reversals, 0 jumps** |
+
+Screenshots: [prediction-before.png](./screenshots/prediction-before.png) (old client, mid-walk) · [prediction-after.png](./screenshots/prediction-after.png) (new client, mid-walk in the 150-avatar crowd). Per-task pairs: [T4.1-before](./screenshots/T4.1-before.png) / [T4.1-after](./screenshots/T4.1-after.png), [T4.2-before](./screenshots/T4.2-before.png) / [T4.2-after](./screenshots/T4.2-after.png).
+
+#### Tests
+- `cargo test` (workspace, no `TEST_DATABASE_URL`): **55 passed, 0 failed**. That is bot 2, protocol 6 + serde 16, server 20 unit, echo 1, netsim_e2e 3, persistence 1, zone_e2e 6.
+- Unity EditMode `Demo.Tests.EditMode`: **20 passed, 0 failed**. That is `LocalPredictorTests` 6, `SnapshotInterpolatorTests` 5, `ProtocolTests` 6, `JoinScreenArgsTests` 3.
+
+#### Requirement acceptance criteria
+| # | Criterion (REQUIREMENTS-prediction.md) | Evidence | Result |
+|---|---|---|---|
+| 1 | Key press → position and facing change within 1 frame, walk animation the same frame | T5.1: move and `Moving` both +0 frames from `wKey.isPressed`, under 200/80 with 150 avatars. EditMode `SetInputThenAdvance_MovesAndFaces` | ✅ |
+| 2 | Input to zero → stops within 1 frame; settles ≤ 0.3 m within 250 ms of the stop ack | First still frame +0, idle animation +0. \|display − snapshot\| 0.002 m at +250 ms. EditMode `Reconcile_AfterStop_ConvergesWithinTolerance` | ✅ |
+| 3 | Walking straight → no correction snap (> 1 m) | 0 snaps in 100 reconciles over a 5 s walk (max error 0.0045 m). EditMode `Reconcile_SteadyWalk_ErrorNearZero` | ✅ |
+| 4 | Remote on a straight segment away from bounds → never moves backward, no snaps | 11,460 filtered pairs across 10 bots: 0 reversals, 0 jumps. 0 jumps in all 14,280 pairs. EditMode `Interpolator_JitteredArrivals_Monotonic` | ✅ |
+| 5 | Snapshot gap > render delay → extrapolate ≤ 50 ms, then hold at ≤ v × 50 ms past last known | EditMode `Interpolator_Underrun_ExtrapolatesThenHolds` (Interpolating → Extrapolating at 25 ms → Holding at 80 ms, held at newest + v × 0.05). Observed live in T4.2 during an 883 ms editor stall: all remotes went to `Holding` | ✅ |
+| 6 | World bound → prediction clamps to ±worldHalf like the server | EditMode `MovementRules_ClampsToWorldHalf` (same cases as `player.rs` `clamps_to_world_bounds`) | ✅ |
+| 7 | `cargo test` and Unity EditMode pass, including updated serde/Protocol and new prediction/interpolation tests | 55/55 and 20/20 above | ✅ |
+| 8 | 150 bots + editor → fps ≥ baseline − 10 % | 142.7 fps vs 153.4 baseline = 93.0 % (floor 138.1) | ✅ |
+| 9 | Before/after screenshots in `docs/screenshots/`, run recorded here | Links above; this section | ✅ |
+
+#### Deviations & caveats
+- **`ageMs` semantics amended (user-approved during T3.1).**
+  - The design reset the age on every accepted input. The server snaps each input to the previous tick boundary, so the 100 ms same-direction resends moved the anchor 0–50 ms each time. The EditMode steady-walk test measured 0.25 m of error.
+  - The server now resets `input_age` only when the direction changes, and the client consumes the age from the start of the same-direction run.
+  - The requirements, both design docs and the task plan are updated.
+- **The stop "60-frame run" metric shows +60 frames, while the first still frame is +0.**
+  - After the stop ack (272 ms later), the tick-quantization correction fades over 100 ms. The settle log shows it dropping from 0.072 m to 0.002 m. That fade moves the avatar ≥ 1 mm on some frames, which restarts the run counter.
+  - The avatar stops on the frame W is released; this is the ≤ 0.25 m residual the design expects.
+  - The first-still-frame metric is the right comparison. The baseline used the 60-frame run only because exponential smoothing never stops exactly.
+- **Frame time dropped 7 % vs the T1.1 baseline** (153.4 → 142.7 fps). It is within the 10 % budget and matches Run 2 (142.5 fps without netsim).
+  - Part of the cost is the sampler itself, which records 10 bots per frame through reflection in the phases after the frame-time sample. The frame-time phase ran before that recording.
+  - Editor-to-editor variance between runs was not measured.
+- **Synthetic keys** go through `InputState.Change` inside the player loop (same as T1.1). `InputSystem.QueueStateEvent` doesn't reach play-mode code while the editor is unfocused.
+- **Remote analysis** uses the render tick read in `onBeforeRender`. `ZoneView` computes its own in `Update` earlier in the same frame, so segment classification at snapshot boundaries can be off by one frame.
+- **MCP polling stalls the editor.** A T4.2 diagnostic that polled during sampling hit an 883 ms stall, after which all remotes held and then caught up in 0.5 m / 0.17 m steps. All T5.1 numbers come from an unpolled hook.
+- **Open item from T4.2.** A 3 s single-bot sample right after joining showed 3 jumps up to 2.36× the limit. It was not reproduced in the clean T4.2 re-sample or in T5.1 (0 in 14,280 pairs), and the cause is not established.
+- **Existing `NetworkClient` reconnect bug** (not part of this work, not fixed). If the connection drops without `Disconnect()`, the old `SendLoop` stays alive and can swallow the first message of the next connection. Here that was the join, which left the client in `Joining`.
+- **No bot report.** The 1,800 s bot run was stopped after sampling, so the bot report (latency, recv rate) wasn't printed. Server `/metrics` log lines are the evidence for 150 players at 20 Hz.
+- Latency caveats from Run 1 still apply: one shared clock, and bots, server and Unity all on one machine.

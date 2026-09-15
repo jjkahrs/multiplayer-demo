@@ -109,8 +109,8 @@ Client → Server:
 ```
 Server → Client:
 ```json
-{ "type": "joined", "playerId": 7, "name": "Bob", "x": 0.0, "z": 0.0, "yaw": 1.5708 }
-{ "type": "snapshot", "players": [ { "id": 7, "name": "Bob", "x": 12.0, "z": -3.5, "yaw": 2.0, "state": "walk", "seq": 42, "t0": 912345 } ] }
+{ "type": "joined", "playerId": 7, "name": "Bob", "x": 0.0, "z": 0.0, "yaw": 1.5708, "speed": 5.0, "worldHalf": 50.0, "tickHz": 20 }
+{ "type": "snapshot", "tick": 1234, "players": [ { "id": 7, "name": "Bob", "x": 12.0, "z": -3.5, "yaw": 2.0, "state": "walk", "seq": 42, "t0": 912345, "ageMs": 150 } ] }
 { "type": "playerJoined", "id": 9, "name": "Alice" }
 { "type": "playerLeft", "id": 9 }
 { "type": "error", "code": "bad_name", "message": "..." }
@@ -118,6 +118,7 @@ Server → Client:
 Decisions:
 - **`t0` echo**: each snapshot entry carries the newest `seq`/`t0` that player sent. A receiver computes `localNow - t0` = **one-way A→server→B latency**. Valid only with a shared clock (single demo machine); cross-machine runs must use it as a relative number. The bot loader reports exactly this for all cross-peer entries.
 - **`yaw` in radians**, computed from the movement direction when walking; frozen while idle. Unity applies it as `Quaternion.AngleAxis(yaw, Vector3.up)`.
+- **Prediction fields** (`speed`/`worldHalf`/`tickHz` in `joined`, `tick` in `snapshot`, `ageMs` per player): see [TECHNICAL_DESIGN-prediction.md](./TECHNICAL_DESIGN-prediction.md). `ageMs` is how long the server has integrated the player's current direction.
 - **`playerId` is session-unique, not the DB row id.** Two concurrent "Bob"s get different playerIds (distinguishable) while sharing one profile row.
 
 ### MySQL

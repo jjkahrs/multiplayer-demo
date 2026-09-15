@@ -35,6 +35,10 @@ namespace Demo
         public double x;
         public double z;
         public double yaw;
+        // Movement rules for client prediction.
+        public double speed;
+        public double worldHalf;
+        public long tickHz;
     }
 
     [Serializable]
@@ -48,12 +52,14 @@ namespace Demo
         public string state; // "idle" | "walk"
         public long seq;
         public long t0;
+        public long ageMs; // how long the server has integrated input seq
     }
 
     [Serializable]
     public class ServerSnapshot
     {
         public string type;
+        public long tick; // zone tick counter, monotonic
         public List<ServerPlayer> players;
     }
 

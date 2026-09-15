@@ -53,7 +53,7 @@ async fn join_move_peer_and_disconnect() {
     let mut frozen = None;
     loop {
         match recv(&mut bob).await.expect("bob disconnected") {
-            ServerMsg::Snapshot { players } => {
+            ServerMsg::Snapshot { players, .. } => {
                 let a = find(&players, alice_id).expect("Alice removed before playerLeft");
                 if a.state == PlayerState::Idle {
                     let (x, z) = *frozen.get_or_insert((a.x, a.z));

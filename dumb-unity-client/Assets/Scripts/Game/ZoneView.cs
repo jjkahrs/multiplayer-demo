@@ -4,28 +4,35 @@ using UnityEngine;
 namespace Demo
 {
     /// <summary>
-    /// Owns the avatar registry. Reconciles purely from snapshots: spawns unknown ids,
-    /// removes ids missing from the snapshot, and smooths the 20 Hz steps in Update.
+    /// Owns the avatar registry: spawns unknown ids and removes ids missing from a snapshot.
+    /// The local avatar follows LocalPredictor; remote avatars render renderDelay behind the server
+    /// timeline through one SnapshotInterpolator each, all sharing one TickClock.
     /// </summary>
     public class ZoneView : MonoBehaviour
     {
         [SerializeField] private NetworkClient client;
+        [SerializeField] private MovementInput movementInput;
         [SerializeField] private PlayerAvatar avatarPrefab;
         [SerializeField] private CameraFollow cameraFollow;
-        [SerializeField] private float smoothing = 15f;
+        [SerializeField] private float renderDelay = 0.1f;
+        [SerializeField] private float maxExtrapolation = 0.05f;
+        [SerializeField] private float correctionTime = 0.1f;
+        [SerializeField] private float snapDistance = 1f;
 
         private class Entry
         {
             public PlayerAvatar Avatar;
-            public Vector3 TargetPosition;
-            public Quaternion TargetRotation;
-            public string State;
+            /// <summary>Null for the local player, which follows the predictor.</summary>
+            public SnapshotInterpolator Interpolator;
         }
 
         private readonly Dictionary<long, Entry> entries = new Dictionary<long, Entry>();
         private readonly HashSet<long> seen = new HashSet<long>();
         private readonly List<long> stale = new List<long>();
         private long localPlayerId = -1;
+        private MovementRules rules;
+        private TickClock clock;
+        private LocalPredictor predictor;
 
         public int AvatarCount => entries.Count;
 
@@ -41,29 +48,40 @@ namespace Demo
             client.OnJoined -= HandleJoined;
             client.OnSnapshot -= HandleSnapshot;
             client.OnDisconnected -= HandleDisconnected;
+            StopPrediction();
         }
 
-        private void HandleJoined(ServerJoined joined) => localPlayerId = joined.playerId;
+        private void HandleJoined(ServerJoined joined)
+        {
+            StopPrediction();
+            localPlayerId = joined.playerId;
+            rules = new MovementRules(joined);
+            clock = new TickClock(rules.TickHz);
+            predictor = new LocalPredictor(rules, new Vector2((float)joined.x, (float)joined.z), (float)joined.yaw, correctionTime, snapDistance);
+            movementInput.OnInputSent += HandleInputSent;
+        }
+
+        private void HandleInputSent(long seq, Vector2 direction) => predictor.SetInput(seq, direction);
 
         private void HandleSnapshot(ServerSnapshot snapshot)
         {
+            // Snapshots can beat the joined reply; without the rules and local id they can't be placed.
+            if (clock == null) return;
+            clock.OnSnapshot(snapshot.tick, Time.realtimeSinceStartupAsDouble);
+
             seen.Clear();
             foreach (var player in snapshot.players)
             {
                 seen.Add(player.id);
-                var position = new Vector3((float)player.x, 0f, (float)player.z);
-                // Server yaw is atan2(dir_z, dir_x); face that direction (model forward is +z).
-                var rotation = Quaternion.LookRotation(new Vector3(Mathf.Cos((float)player.yaw), 0f, Mathf.Sin((float)player.yaw)));
-
+                var position = new Vector2((float)player.x, (float)player.z);
                 if (!entries.TryGetValue(player.id, out var entry))
                 {
-                    entry = new Entry { Avatar = Spawn(player, position, rotation) };
+                    entry = Spawn(player, position);
                     entries.Add(player.id, entry);
                 }
 
-                entry.TargetPosition = position;
-                entry.TargetRotation = rotation;
-                entry.State = player.state;
+                if (entry.Interpolator == null) predictor.Reconcile(player.seq, player.ageMs, position);
+                else entry.Interpolator.Add(snapshot.tick, position, (float)player.yaw, player.state == "walk");
             }
 
             stale.Clear();
@@ -72,15 +90,19 @@ namespace Demo
             foreach (var id in stale) Remove(id);
         }
 
-        private PlayerAvatar Spawn(ServerPlayer player, Vector3 position, Quaternion rotation)
+        private Entry Spawn(ServerPlayer player, Vector2 position)
         {
-            var avatar = Instantiate(avatarPrefab, position, rotation, transform);
+            var avatar = Instantiate(avatarPrefab, ToWorld(position), ToRotation((float)player.yaw), transform);
             var isLocal = player.id == localPlayerId;
             avatar.name = $"Player_{player.id}";
             avatar.SetName(player.name);
             avatar.SetLocal(isLocal);
             if (isLocal) cameraFollow.target = avatar.transform;
-            return avatar;
+            return new Entry
+            {
+                Avatar = avatar,
+                Interpolator = isLocal ? null : new SnapshotInterpolator(maxExtrapolation, rules.TickHz),
+            };
         }
 
         private void Remove(long id)
@@ -95,19 +117,45 @@ namespace Demo
             entries.Clear();
             localPlayerId = -1;
             cameraFollow.target = null;
+            StopPrediction();
+        }
+
+        private void StopPrediction()
+        {
+            if (movementInput != null) movementInput.OnInputSent -= HandleInputSent;
+            predictor = null;
+            clock = null;
         }
 
         private void Update()
         {
-            // Frame-rate independent exponential smoothing toward the latest snapshot.
-            var t = 1f - Mathf.Exp(-smoothing * Time.deltaTime);
+            if (predictor == null) return;
+            predictor.Advance(Time.deltaTime);
+            // Entries only exist after a snapshot, so the clock is synced whenever there is something to place.
+            if (entries.Count == 0) return;
+
+            var renderTick = clock.RenderTick(Time.realtimeSinceStartupAsDouble, renderDelay);
             foreach (var entry in entries.Values)
             {
-                var avatarTransform = entry.Avatar.transform;
-                avatarTransform.position = Vector3.Lerp(avatarTransform.position, entry.TargetPosition, t);
-                avatarTransform.rotation = Quaternion.Slerp(avatarTransform.rotation, entry.TargetRotation, t);
-                entry.Avatar.SetState(entry.State);
+                if (entry.Interpolator == null)
+                {
+                    Apply(entry.Avatar, predictor.DisplayPosition, predictor.Yaw, predictor.IsMoving);
+                    continue;
+                }
+                entry.Interpolator.Sample(renderTick, out var position, out var yaw, out var walking);
+                Apply(entry.Avatar, position, yaw, walking);
             }
         }
+
+        private static void Apply(PlayerAvatar avatar, Vector2 position, float yaw, bool walking)
+        {
+            avatar.transform.SetPositionAndRotation(ToWorld(position), ToRotation(yaw));
+            avatar.SetState(walking ? "walk" : "idle");
+        }
+
+        private static Vector3 ToWorld(Vector2 position) => new Vector3(position.x, 0f, position.y);
+
+        // Server yaw is atan2(dir_z, dir_x); face that direction (model forward is +z).
+        private static Quaternion ToRotation(float yaw) => Quaternion.LookRotation(new Vector3(Mathf.Cos(yaw), 0f, Mathf.Sin(yaw)));
     }
 }

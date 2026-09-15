@@ -39,6 +39,9 @@ pub struct SnapshotPlayer {
     pub state: PlayerState,
     pub seq: u64,
     pub t0: u64,
+    /// Milliseconds the server has integrated the current direction, through input `seq`
+    /// (sum of tick dt since an accepted input last changed the direction).
+    pub age_ms: u64,
 }
 
 /// Messages a client sends to the server.
@@ -70,17 +73,23 @@ pub enum ClientMsg {
 #[serde(tag = "type", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum ServerMsg {
     /// Reply to a successful `join`, sent once to that client only: its
-    /// session id and initial authoritative position/facing.
+    /// session id and initial authoritative position/facing, plus the
+    /// movement rules (`speed`, `world_half`, `tick_hz`) for client prediction.
     Joined {
         player_id: u64,
         name: String,
         x: f64,
         z: f64,
         yaw: f64,
+        speed: f64,
+        world_half: f64,
+        tick_hz: u64,
     },
     /// Full world snapshot broadcast at the tick rate, containing every
     /// connected (non-removed) player including the receiver.
     Snapshot {
+        /// Zone tick counter: monotonic, starts at 0.
+        tick: u64,
         players: Vec<SnapshotPlayer>,
     },
     /// A player entered the world while this client was connected.

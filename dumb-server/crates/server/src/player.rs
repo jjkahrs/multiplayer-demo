@@ -34,6 +34,9 @@ pub struct Player {
     pub seq: u64,
     /// Newest accepted input client timestamp (ms), echoed in snapshots.
     pub t0: u64,
+    /// Seconds the Zone has integrated the current direction. Only a direction change resets it, so
+    /// same-direction resends don't re-anchor it to a tick boundary; clients use it to skip simulated time.
+    pub input_age: f64,
     pub status: PlayerStatus,
     /// Database profile row, `None` when running without persistence.
     pub profile_id: Option<u64>,
@@ -54,6 +57,7 @@ impl Player {
             dir_z: 0.0,
             seq: 0,
             t0: 0,
+            input_age: 0.0,
             status: PlayerStatus::Active,
             profile_id: None,
             last_input_at: None,
@@ -61,17 +65,21 @@ impl Player {
     }
 
     /// Accept a movement intent. Vectors longer than 1 (or non-finite) are
-    /// untrusted and ignored entirely, leaving direction, `seq` and `t0` as-is.
+    /// untrusted and ignored entirely, leaving direction, `seq`, `t0` and `input_age` as-is.
     pub fn apply_input(&mut self, vx: f64, vz: f64, seq: u64, t0: u64) {
         let magnitude = vx.hypot(vz);
         if !magnitude.is_finite() || magnitude > 1.0 + MOVE_EPSILON {
             return;
         }
-        (self.dir_x, self.dir_z) = if magnitude > MOVE_EPSILON {
+        let direction = if magnitude > MOVE_EPSILON {
             (vx / magnitude, vz / magnitude)
         } else {
             (0.0, 0.0)
         };
+        if direction != (self.dir_x, self.dir_z) {
+            self.input_age = 0.0;
+        }
+        (self.dir_x, self.dir_z) = direction;
         self.seq = seq;
         self.t0 = t0;
     }
@@ -105,6 +113,7 @@ impl Player {
             state: self.state(),
             seq: self.seq,
             t0: self.t0,
+            age_ms: (self.input_age * 1000.0).round() as u64,
         }
     }
 
@@ -163,6 +172,22 @@ mod tests {
         assert_eq!((player.x, player.z), (3.0, 4.0));
         assert_eq!((player.seq, player.t0), (0, 0));
         assert_eq!(player.state(), PlayerState::Idle);
+    }
+
+    #[test]
+    fn input_age_resets_on_direction_change_only() {
+        let mut player = player_at(0.0, 0.0);
+        player.input_age = 1.0;
+        player.apply_input(1.5, 0.0, 1, 0);
+        assert_eq!(player.input_age, 1.0, "rejected input keeps the age");
+        player.apply_input(0.0, 0.0, 2, 0);
+        assert_eq!((player.input_age, player.seq), (1.0, 2), "same direction keeps the age");
+        player.apply_input(1.0, 0.0, 3, 0);
+        assert_eq!(player.input_age, 0.0, "new direction resets the age");
+        player.input_age = 0.5;
+        player.apply_input(1.0, 0.0, 4, 0);
+        assert_eq!((player.input_age, player.seq), (0.5, 4), "resend keeps the age");
+        assert_eq!(player.snapshot().age_ms, 500);
     }
 
     #[test]

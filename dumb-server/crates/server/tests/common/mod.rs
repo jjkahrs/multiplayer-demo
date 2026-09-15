@@ -109,7 +109,7 @@ pub async fn recv_until(client: &mut Client, done: impl Fn(&ServerMsg) -> bool) 
 pub async fn next_snapshot(client: &mut Client) -> Vec<SnapshotPlayer> {
     loop {
         match recv(client).await {
-            Some(ServerMsg::Snapshot { players }) => return players,
+            Some(ServerMsg::Snapshot { players, .. }) => return players,
             Some(_) => continue,
             None => panic!("connection closed while waiting for a snapshot"),
         }

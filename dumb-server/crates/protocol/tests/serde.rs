@@ -34,8 +34,26 @@ fn snapshot_player(id: u64, name: &str, x: f64, z: f64) -> SnapshotPlayer {
         state: PlayerState::Walk,
         seq: 1,
         t0: 9000,
+        age_ms: 150,
     }
 }
+
+fn bob_joined() -> ServerMsg {
+    ServerMsg::Joined {
+        player_id: 7,
+        name: "Bob".to_owned(),
+        x: 0.0,
+        z: 0.0,
+        yaw: 1.5708,
+        speed: 5.0,
+        world_half: 50.0,
+        tick_hz: 20,
+    }
+}
+
+const JOINED_JSON: &str =
+    r#"{"type":"joined","playerId":7,"name":"Bob","x":0.0,"z":0.0,"yaw":1.5708,"speed":5.0,"worldHalf":50.0,"tickHz":20}"#;
+const SNAPSHOT_JSON: &str = r#"{"type":"snapshot","tick":1234,"players":[{"id":7,"name":"Bob","x":12.0,"z":-3.5,"yaw":2.0,"state":"walk","seq":1,"t0":9000,"ageMs":150}]}"#;
 
 #[test]
 fn client_messages_roundtrip() {
@@ -63,14 +81,9 @@ fn client_messages_roundtrip_non_default_fields() {
 
 #[test]
 fn server_messages_roundtrip() {
-    assert_roundtrip(&ServerMsg::Joined {
-        player_id: 7,
-        name: "Bob".to_owned(),
-        x: 0.0,
-        z: 0.0,
-        yaw: 1.5708,
-    });
+    assert_roundtrip(&bob_joined());
     assert_roundtrip(&ServerMsg::Snapshot {
+        tick: 0,
         players: vec![
             snapshot_player(7, "Bob", 12.0, -3.5),
             snapshot_player(8, "Alice", -1.25, 9.5),
@@ -90,6 +103,7 @@ fn server_messages_roundtrip() {
 #[test]
 fn server_messages_roundtrip_non_default_fields() {
     assert_roundtrip(&ServerMsg::Snapshot {
+        tick: u64::MAX,
         players: vec![SnapshotPlayer {
             id: u64::MAX,
             name: "Mover".to_owned(),
@@ -99,6 +113,7 @@ fn server_messages_roundtrip_non_default_fields() {
             state: PlayerState::Idle,
             seq: 42,
             t0: 912_345,
+            age_ms: u64::MAX,
         }],
     });
     assert_roundtrip(&ServerMsg::Joined {
@@ -107,12 +122,16 @@ fn server_messages_roundtrip_non_default_fields() {
         x: -49.75,
         z: 50.0,
         yaw: 3.14159,
+        speed: 7.5,
+        world_half: 125.0,
+        tick_hz: 60,
     });
 }
 
 #[test]
 fn snapshot_with_one_player_roundtrips() {
     let snapshot = ServerMsg::Snapshot {
+        tick: 1,
         players: vec![snapshot_player(7, "Bob", 12.0, -3.5)],
     };
     assert_roundtrip(&snapshot);
@@ -121,6 +140,7 @@ fn snapshot_with_one_player_roundtrips() {
 #[test]
 fn snapshot_with_three_players_roundtrips() {
     let snapshot = ServerMsg::Snapshot {
+        tick: 2,
         players: vec![
             snapshot_player(7, "Bob", 0.0, 0.0),
             snapshot_player(8, "Alice", 10.0, 5.0),
@@ -143,28 +163,16 @@ fn join_serializes_to_design_json() {
 
 #[test]
 fn joined_serializes_to_design_json() {
-    let msg = ServerMsg::Joined {
-        player_id: 7,
-        name: "Bob".to_owned(),
-        x: 0.0,
-        z: 0.0,
-        yaw: 1.5708,
-    };
-    assert_eq!(
-        serde_json::to_string(&msg).unwrap(),
-        r#"{"type":"joined","playerId":7,"name":"Bob","x":0.0,"z":0.0,"yaw":1.5708}"#
-    );
+    assert_eq!(serde_json::to_string(&bob_joined()).unwrap(), JOINED_JSON);
 }
 
 #[test]
 fn single_player_snapshot_serializes_to_design_json() {
     let msg = ServerMsg::Snapshot {
+        tick: 1234,
         players: vec![snapshot_player(7, "Bob", 12.0, -3.5)],
     };
-    assert_eq!(
-        serde_json::to_string(&msg).unwrap(),
-        r#"{"type":"snapshot","players":[{"id":7,"name":"Bob","x":12.0,"z":-3.5,"yaw":2.0,"state":"walk","seq":1,"t0":9000}]}"#
-    );
+    assert_eq!(serde_json::to_string(&msg).unwrap(), SNAPSHOT_JSON);
 }
 
 #[test]
@@ -190,28 +198,14 @@ fn exact_design_strings_deserialize() {
         }
     );
 
-    let joined: ServerMsg = serde_json::from_str(
-        r#"{"type":"joined","playerId":7,"name":"Bob","x":0.0,"z":0.0,"yaw":1.5708}"#,
-    )
-    .expect("joined parses");
-    assert_eq!(
-        joined,
-        ServerMsg::Joined {
-            player_id: 7,
-            name: "Bob".to_owned(),
-            x: 0.0,
-            z: 0.0,
-            yaw: 1.5708
-        }
-    );
+    let joined: ServerMsg = serde_json::from_str(JOINED_JSON).expect("joined parses");
+    assert_eq!(joined, bob_joined());
 
-    let snapshot: ServerMsg = serde_json::from_str(
-        r#"{"type":"snapshot","players":[{"id":7,"name":"Bob","x":12.0,"z":-3.5,"yaw":2.0,"state":"walk","seq":1,"t0":9000}]}"#,
-    )
-    .expect("snapshot parses");
+    let snapshot: ServerMsg = serde_json::from_str(SNAPSHOT_JSON).expect("snapshot parses");
     assert_eq!(
         snapshot,
         ServerMsg::Snapshot {
+            tick: 1234,
             players: vec![snapshot_player(7, "Bob", 12.0, -3.5)]
         }
     );

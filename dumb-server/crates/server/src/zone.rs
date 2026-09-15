@@ -80,6 +80,8 @@ pub fn spawn(config: &Config, pool: Option<MySqlPool>) -> ZoneHandle {
     let zone = Zone {
         speed: config.speed,
         world_half: config.world_half,
+        tick_hz: config.tick_hz.max(1),
+        tick: 0,
         grace: Duration::from_millis(config.grace_ms),
         next_player_id: 1,
         players: HashMap::new(),
@@ -87,7 +89,7 @@ pub fn spawn(config: &Config, pool: Option<MySqlPool>) -> ZoneHandle {
         metrics: metrics.clone(),
         store,
     };
-    tokio::spawn(zone.run(events_rx, loaded_rx, config.tick_hz.max(1)));
+    tokio::spawn(zone.run(events_rx, loaded_rx));
     ZoneHandle { events, outbound, metrics }
 }
 
@@ -122,6 +124,10 @@ async fn run_store(
 struct Zone {
     speed: f64,
     world_half: f64,
+    /// Snapshots per second; sent to clients in `joined` for prediction.
+    tick_hz: u64,
+    /// Ticks run so far, stamped on each snapshot (monotonic, first snapshot is 1).
+    tick: u64,
     /// How long a disconnected player stays frozen in the world before removal.
     grace: Duration,
     /// Session ids are monotonic and never reused.
@@ -134,12 +140,8 @@ struct Zone {
 }
 
 impl Zone {
-    async fn run(
-        mut self,
-        mut events: mpsc::Receiver<ClientEvent>,
-        mut loaded: mpsc::UnboundedReceiver<Loaded>,
-        tick_hz: u64,
-    ) {
+    async fn run(mut self, mut events: mpsc::Receiver<ClientEvent>, mut loaded: mpsc::UnboundedReceiver<Loaded>) {
+        let tick_hz = self.tick_hz;
         let mut ticker = interval(Duration::from_secs_f64(1.0 / tick_hz as f64));
         // Skip keeps ticks on the fixed grid. Delay re-bases on every late wake-up,
         // so Windows timer overshoot (~12 ms) accumulated into ~16 Hz instead of 20.
@@ -205,7 +207,16 @@ impl Zone {
         let mut player = Player::new(player_id, name, x, z, yaw);
         player.profile_id = profile.map(|p| p.id);
 
-        let joined = ServerMsg::Joined { player_id, name: player.name.clone(), x, z, yaw };
+        let joined = ServerMsg::Joined {
+            player_id,
+            name: player.name.clone(),
+            x,
+            z,
+            yaw,
+            speed: self.speed,
+            world_half: self.world_half,
+            tick_hz: self.tick_hz,
+        };
         // Never block the tick on one client. If the reply can't be delivered the
         // connection can never learn its id (so can't send Closed): don't keep a ghost.
         if unicast_tx.try_send(joined).is_ok() {
@@ -244,6 +255,8 @@ impl Zone {
         self.remove_expired();
         for player in self.players.values_mut() {
             if player.status == PlayerStatus::Active {
+                // Age before integrating, moving or not, so age and position cover the same span.
+                player.input_age += dt;
                 player.integrate(dt, self.speed, self.world_half);
             }
         }
@@ -256,7 +269,8 @@ impl Zone {
             .collect();
         let count = players.len();
 
-        match serde_json::to_vec(&ServerMsg::Snapshot { players }) {
+        self.tick += 1;
+        match serde_json::to_vec(&ServerMsg::Snapshot { tick: self.tick, players }) {
             // A send error only means nobody is subscribed right now.
             Ok(bytes) => drop(self.outbound.send(Outbound::Snapshot(bytes.into()))),
             Err(err) => tracing::error!(%err, "snapshot serialization failed"),
@@ -284,21 +298,29 @@ mod tests {
         }
     }
 
-    async fn join(zone: &ZoneHandle, name: &str) -> u64 {
+    async fn join_reply(zone: &ZoneHandle, name: &str) -> ServerMsg {
         let (unicast_tx, mut unicast_rx) = mpsc::channel(1);
         let event = ClientEvent::Join { name: name.to_owned(), unicast_tx };
         zone.events.send(event).await.unwrap();
-        match unicast_rx.recv().await {
-            Some(ServerMsg::Joined { player_id, .. }) => player_id,
+        unicast_rx.recv().await.expect("no joined reply")
+    }
+
+    async fn join(zone: &ZoneHandle, name: &str) -> u64 {
+        match join_reply(zone, name).await {
+            ServerMsg::Joined { player_id, .. } => player_id,
             other => panic!("expected joined, got {other:?}"),
         }
     }
 
-    fn parse(bytes: &[u8]) -> Vec<SnapshotPlayer> {
+    fn parse_with_tick(bytes: &[u8]) -> (u64, Vec<SnapshotPlayer>) {
         match serde_json::from_slice(bytes).unwrap() {
-            ServerMsg::Snapshot { players } => players,
+            ServerMsg::Snapshot { tick, players } => (tick, players),
             other => panic!("expected snapshot, got {other:?}"),
         }
+    }
+
+    fn parse(bytes: &[u8]) -> Vec<SnapshotPlayer> {
+        parse_with_tick(bytes).1
     }
 
     /// Receive snapshots until `done` accepts one, or panic after `within`.
@@ -345,6 +367,49 @@ mod tests {
         assert_eq!(stats.players, 2);
         assert!(stats.tick_count >= 10);
         assert!((stats.last_tick_dt_ms - 50.0).abs() < 1.0, "dt {}", stats.last_tick_dt_ms);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn snapshot_tick_increments_and_age_accumulates() {
+        let zone = spawn(&test_config(), None);
+        let alice = join(&zone, "Alice").await;
+        let mut snapshots = zone.outbound.subscribe();
+        let input = ClientEvent::Input { player_id: alice, vx: 1.0, vz: 0.0, seq: 1, t0: 0 };
+        zone.events.send(input).await.unwrap();
+
+        let deadline = Instant::now() + Duration::from_millis(1000);
+        let mut acked: Vec<(u64, u64)> = Vec::new(); // (tick, age_ms) of snapshots echoing seq 1
+        while acked.len() < 5 {
+            let Ok(Ok(Outbound::Snapshot(bytes))) = timeout_at(deadline, snapshots.recv()).await else {
+                panic!("only {} acked snapshots within 1 s", acked.len());
+            };
+            let (tick, players) = parse_with_tick(&bytes);
+            if let Some(tick_before) = acked.last().map(|&(t, _)| t) {
+                assert_eq!(tick, tick_before + 1, "ticks are consecutive");
+            }
+            let alice = players.iter().find(|p| p.id == alice).unwrap();
+            if alice.seq == 1 {
+                acked.push((tick, alice.age_ms));
+            }
+        }
+
+        let (first_tick, first_age) = acked[0];
+        assert!(first_age <= 55, "first ack credits at most one tick, got {first_age} ms");
+        for &(tick, age) in &acked[1..] {
+            let expected = first_age + (tick - first_tick) * 50;
+            assert!(age.abs_diff(expected) <= 5, "tick {tick}: age {age} ms, expected {expected}");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn joined_carries_movement_rules() {
+        let zone = spawn(&test_config(), None);
+        match join_reply(&zone, "Alice").await {
+            ServerMsg::Joined { speed, world_half, tick_hz, .. } => {
+                assert_eq!((speed, world_half, tick_hz), (5.0, 50.0, 20));
+            }
+            other => panic!("expected joined, got {other:?}"),
+        }
     }
 
     #[tokio::test(start_paused = true)]

@@ -455,6 +455,9 @@ MonoBehaviour:
   target: {fileID: 0}
   offset: {x: 0, y: 40, z: -30}
   damping: 5
+  minZoom: 0.3
+  maxZoom: 2
+  zoomStep: 0.1
 --- !u!1 &408407690
 GameObject:
   m_ObjectHideFlags: 0
@@ -1582,9 +1585,13 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: Demo::Demo.ZoneView
   client: {fileID: 1850309257}
+  movementInput: {fileID: 1850309260}
   avatarPrefab: {fileID: 3122938127262746910, guid: 2bce64457b7e6cb4a86d0c9dff9ee45c, type: 3}
   cameraFollow: {fileID: 330585548}
-  smoothing: 15
+  renderDelay: 0.1
+  maxExtrapolation: 0.05
+  correctionTime: 0.1
+  snapDistance: 1
 --- !u!114 &1850309260
 MonoBehaviour:
   m_ObjectHideFlags: 0
